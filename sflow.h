@@ -35,6 +35,7 @@ typedef struct _sflow_sample_element_hdr {
 
 enum sflow_sampletype {
     SFLOW_SAMPLETYPE_SAMPLE = 1,
+    SFLOW_SAMPLETYPE_EXPANDED = 3,
 };
 
 typedef struct _sflow_sample_common {
@@ -54,6 +55,22 @@ typedef struct _sflow_sample {
     net_uint32_t out_ifindex;
     net_uint32_t n_elements;
 } sflow_sample;
+
+typedef struct _sflow_sample_expanded {
+    net_uint32_t tag; /* enum sflow_sampletype */
+    net_uint32_t len;
+    net_uint32_t seq;
+    net_uint32_t source_id_type;
+    net_uint32_t source_id_index;
+    net_uint32_t rate;
+    net_uint32_t pool;
+    net_uint32_t drops;
+    net_uint32_t input_if_format;
+    net_uint32_t input_if_value;
+    net_uint32_t output_if_format;
+    net_uint32_t output_if_value;
+    net_uint32_t n_elements;
+} sflow_sample_expanded;
 
 enum sflow_af {
     SFLOW_AF_UNDEFINED = 0,
@@ -97,7 +114,12 @@ typedef struct _sflow_parsed_elements {
 } sflow_parsed_elements;
 
 typedef struct _sflow_parsed_samples {
-    const sflow_sample *sample;
+    uint32_t seq;
+    uint32_t rate;
+    uint32_t pool;
+    uint32_t in_ifindex;
+    uint32_t out_ifindex;
+    uint32_t n_elements;
     sflow_parsed_elements *elements;
     struct _sflow_parsed_samples *next;
 } sflow_parsed_samples;

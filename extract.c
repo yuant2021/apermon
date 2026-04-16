@@ -222,11 +222,11 @@ int extract_flows(const sflow_parsed *parsed, apermon_flows **flows) {
 
                 if (ret > 0) {
                     record->frame_length = ntohl(element->hdr_element->orig_frame_len);
-                    record->in_ifindex = ntohl(sample->sample->in_ifindex);
-                    record->out_ifindex = ntohl(sample->sample->out_ifindex);
-                    record->pool = ntohl(sample->sample->pool);
-                    record->rate = ntohl(sample->sample->rate);
-                    record->seq = ntohl(sample->sample->seq);
+                    record->in_ifindex = sample->in_ifindex;
+                    record->out_ifindex = sample->out_ifindex;
+                    record->pool = sample->pool;
+                    record->rate = sample->rate;
+                    record->seq = sample->seq;
                     record->next = NULL;
 
                     if (last_record == NULL) {
