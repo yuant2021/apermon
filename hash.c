@@ -31,12 +31,8 @@ static inline apermon_hash_item *_hash_find(apermon_hash *tbl, uint32_t hashed_k
     apermon_hash_item *item = tbl->items[hashed_key], *target = NULL, *prev = NULL;
 
     while (item != NULL) {
-        if (item->key_len != key_len) {
-            item = item->next;
-            continue;
-        }
-
-        if (memcmp(item->key, key, key_len) == 0) {
+        // prev must track every item, keys of other lengths included: callers append after it.
+        if (item->key_len == key_len && memcmp(item->key, key, key_len) == 0) {
             target = item;
             break;
         }
