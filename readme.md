@@ -158,6 +158,8 @@ prefixes {
 }
 ```
 
+A prefix list can also be filled with the prefixes a router announces over BGP, see [BGP-collected prefixes](#bgp-collected-prefixes).
+
 **`actions`** - define actions. Later, we will define `triggers`, which, when triggered, will run an action. `actions` section defines what action(s) can be performed.
 
 ```
@@ -333,3 +335,52 @@ triggers {
 ```
 
 See `apermon.conf.example` for a more complete example. 
+
+### BGP-collected prefixes
+
+`utils/bgp-prefix-sync` keeps a prefix list in sync with the routes a router exports over BGP. Each run opens a short BGP session to the router, receives its IPv4/IPv6 unicast routes until End-of-RIB, closes the session, and renders the prefixes into the config. It only needs python3; run it daily from cron.
+
+The prefixes are matched by shortest prefix instead of longest prefix: every received prefix covered by a shorter received prefix is dropped (e.g., of `198.18.0.0/15`, `198.18.0.0/16` and `198.18.1.0/24`, only `198.18.0.0/15` is kept; siblings are not merged). The remaining prefixes don't overlap, so each address falls into the shortest received prefix containing it, and that is the `PREFIX` passed to scripts and what `aggregate-type prefix` aggregates by. Default routes are skipped.
+
+Write the config as a template with a placeholder line where the prefixes go:
+
+```
+prefixes {
+    customers {
+        @BGP_PREFIXES@
+    }
+    whitelist {
+        192.0.2.0/28;
+    }
+}
+```
+
+Then generate the config, e.g. from `/etc/cron.d/apermon`:
+
+```
+0 4 * * * root /opt/apermon/utils/bgp-prefix-sync --peer 10.66.66.1 --local-address 10.66.66.67 --local-as 65001 --peer-as 65001 --router-id 10.66.66.67 --template /etc/apermon/apermon.conf.in --output /etc/apermon/apermon.conf --reload-cmd "systemctl restart apermon"
+```
+
+Notes:
+
+- The placeholder line is replaced with one `<prefix>;` line per prefix. The output is replaced atomically and keeps the permissions of the existing config (or of the template). `--reload-cmd` only runs if the output changed.
+- Without `--template`/`--output`, the prefixes are printed to stdout, handy for a dry run.
+- If the session fails, or fewer than `--min-prefixes` (default `1`) prefixes are received, the config is left untouched and the exit code is non-zero.
+- The collector asks for End-of-RIB markers (by announcing the Graceful Restart capability) and waits for them, up to `--timeout` seconds. If the router does not announce Graceful Restart itself, the table is considered complete after `--idle-timeout` seconds (default `30`) without updates.
+- Restarting apermon drops its ban state: hosts banned at that moment don't get an `unban` event (e.g., their exabgp blackhole routes stay announced until withdrawn by hand).
+- The router needs a BGP neighbor for the collector, with an export policy selecting the prefixes. Use a source address (`--local-address`) different from other BGP sessions to the router (e.g., exabgp), or the router treats the collector as a connection collision with them. On Junos, for example:
+
+```
+set protocols bgp group apermon type internal
+set protocols bgp group apermon local-address 10.66.66.1
+set protocols bgp group apermon passive
+set protocols bgp group apermon family inet unicast
+set protocols bgp group apermon family inet6 unicast
+set protocols bgp group apermon export apermon-prefixes
+set protocols bgp group apermon neighbor 10.66.66.67
+set policy-options policy-statement apermon-prefixes term customers from community customers
+set policy-options policy-statement apermon-prefixes term customers then accept
+set policy-options policy-statement apermon-prefixes then reject
+```
+
+Routes learned over iBGP are not re-advertised to iBGP neighbors; to export them to the collector, make the group a route reflector client group (`cluster`) or use an eBGP session.

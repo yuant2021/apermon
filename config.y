@@ -415,15 +415,17 @@ prefixes: IDENT LBRACE prefix_elements RBRACE {
     memset($$, 0, sizeof(apermon_config_prefix_lists));
 
     $$->name = strdup($1);
-    $$->elements = $3;
+    $$->elements = reverse_prefix_list_elements($3);
 
     free($1);
 }
 
+// left recursion keeps the parser stack flat for long (e.g. BGP-collected) lists; the list is built in reverse.
 prefix_elements
     : prefix
-    | prefix prefix_elements {
-        $1->next = $2;
+    | prefix_elements prefix {
+        $2->next = $1;
+        $$ = $2;
     }
 
 prefix

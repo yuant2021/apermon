@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""Collect prefixes over BGP and render them into an apermon config.
+
+Connects to a router as a one-shot BGP speaker, receives the routes the router exports to it (IPv4/IPv6 unicast),
+waits for End-of-RIB, and closes the session. The prefixes are reduced to the shortest ones: every prefix covered by
+a shorter received prefix is dropped. The remaining prefixes don't overlap, so apermon matches each address against
+the shortest received prefix containing it (instead of the longest match), whatever order it checks them in.
+
+With --template/--output, the line containing the placeholder (default "@BGP_PREFIXES@") in the template is replaced
+by the prefixes, one "<prefix>;" line each, keeping the placeholder's indentation. The output file is replaced
+atomically and --reload-cmd runs only when the content changed. Without --template, the prefixes are printed.
+
+Meant to run daily from cron. Only needs python3.
+"""
+
+import argparse
+import ipaddress
+import os
+import select
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+MSG_OPEN, MSG_UPDATE, MSG_NOTIFICATION, MSG_KEEPALIVE = 1, 2, 3, 4
+HEADER_LEN, MAX_MSG_LEN = 19, 4096
+AFI_INET, AFI_INET6, SAFI_UNICAST = 1, 2, 1
+ATTR_FLAG_EXTENDED_LENGTH = 0x10
+ATTR_MP_REACH_NLRI, ATTR_MP_UNREACH_NLRI = 14, 15
+OPT_PARAM_CAPABILITIES = 2
+CAP_MULTIPROTOCOL, CAP_GRACEFUL_RESTART, CAP_AS4 = 1, 64, 65
+AS_TRANS = 23456
+FAMILY_NAMES = {AFI_INET: 'inet', AFI_INET6: 'inet6'}
+NETWORK_CLASSES = {AFI_INET: ipaddress.IPv4Network, AFI_INET6: ipaddress.IPv6Network}
+ADDRESS_LENGTHS = {AFI_INET: 4, AFI_INET6: 16}
+
+
+def log(msg):
+    print(f'bgp-prefix-sync: {msg}', file=sys.stderr, flush=True)
+
+
+class BgpError(Exception):
+    pass
+
+
+class Session:
+    """BGP message framing over a connected socket."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b''
+
+    def send(self, msg_type, body=b''):
+        self.sock.sendall(b'\xff' * 16 + struct.pack('!HB', HEADER_LEN + len(body), msg_type) + body)
+
+    def recv(self, timeout):
+        """Returns (type, body) of the next message, or None if none arrived within `timeout` seconds."""
+        deadline = time.monotonic() + timeout
+
+        while True:
+            if len(self.buf) >= HEADER_LEN:
+                length, msg_type = struct.unpack('!HB', self.buf[16:HEADER_LEN])
+                if not HEADER_LEN <= length <= MAX_MSG_LEN:
+                    raise BgpError(f'bad message length {length}')
+
+                if len(self.buf) >= length:
+                    body, self.buf = self.buf[HEADER_LEN:length], self.buf[length:]
+                    return msg_type, body
+
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([self.sock], [], [], left)[0]:
+                return None
+
+            data = self.sock.recv(65536)
+            if not data:
+                raise BgpError('connection closed by peer')
+
+            self.buf += data
+
+
+def capability(code, value):
+    return struct.pack('!BB', code, len(value)) + value
+
+
+def notification(body):
+    return f'peer sent NOTIFICATION {body[0]}/{body[1]}' if len(body) >= 2 else 'peer sent NOTIFICATION'
+
+
+def open_message(local_as, hold_time, router_id, families):
+    caps = b''.join(capability(CAP_MULTIPROTOCOL, struct.pack('!HBB', afi, 0, SAFI_UNICAST)) for afi in families)
+    caps += capability(CAP_AS4, struct.pack('!I', local_as))
+    # Graceful Restart without any families: only announces that we want End-of-RIB markers (RFC 4724, section 3).
+    caps += capability(CAP_GRACEFUL_RESTART, struct.pack('!H', 0))
+    params = struct.pack('!BB', OPT_PARAM_CAPABILITIES, len(caps)) + caps
+
+    my_as = local_as if local_as <= 0xffff else AS_TRANS
+    return struct.pack('!BHH4sB', 4, my_as, hold_time, ipaddress.IPv4Address(router_id).packed, len(params)) + params
+
+
+def parse_open(body):
+    """Returns (peer AS, hold time, {capability code: [values]})."""
+    if len(body) < 10:
+        raise BgpError('short OPEN message')
+
+    version, peer_as, hold_time, _, params_len = struct.unpack('!BHH4sB', body[:10])
+    if version != 4:
+        raise BgpError(f'unsupported BGP version {version}')
+
+    caps = {}
+    params = body[10:10 + params_len]
+    while params:
+        param_type, param_len = params[0], params[1]
+        value, params = params[2:2 + param_len], params[2 + param_len:]
+
+        if param_type != OPT_PARAM_CAPABILITIES:
+            continue
+
+        while value:
+            code, cap_len = value[0], value[1]
+            caps.setdefault(code, []).append(value[2:2 + cap_len])
+            value = value[2 + cap_len:]
+
+    if CAP_AS4 in caps:
+        peer_as = struct.unpack('!I', caps[CAP_AS4][0][:4])[0]
+
+    return peer_as, hold_time, caps
+
+
+def parse_nlri(data, afi):
+    prefixes = []
+    addr_len = ADDRESS_LENGTHS[afi]
+
+    while data:
+        bits = data[0]
+        n = (bits + 7) // 8
+        if bits > addr_len * 8 or len(data) < 1 + n:
+            raise BgpError(f'malformed {FAMILY_NAMES[afi]} NLRI')
+
+        prefixes.append(NETWORK_CLASSES[afi]((data[1:1 + n].ljust(addr_len, b'\0'), bits), strict=False))
+        data = data[1 + n:]
+
+    return prefixes
+
+
+def parse_update(body):
+    """Returns (announced, withdrawn, end-of-rib families) of an UPDATE message."""
+    announced, withdrawn, eor = [], [], set()
+
+    withdrawn_len = struct.unpack('!H', body[:2])[0]
+    withdrawn += parse_nlri(body[2:2 + withdrawn_len], AFI_INET)
+    attrs_len = struct.unpack('!H', body[2 + withdrawn_len:4 + withdrawn_len])[0]
+    attrs = body[4 + withdrawn_len:4 + withdrawn_len + attrs_len]
+    announced += parse_nlri(body[4 + withdrawn_len + attrs_len:], AFI_INET)
+
+    if withdrawn_len == 0 and attrs_len == 0 and not announced:
+        return announced, withdrawn, {AFI_INET}
+
+    n_attrs = 0
+    while attrs:
+        flags, attr_type = attrs[0], attrs[1]
+        if flags & ATTR_FLAG_EXTENDED_LENGTH:
+            attr_len, offset = struct.unpack('!H', attrs[2:4])[0], 4
+        else:
+            attr_len, offset = attrs[2], 3
+
+        value, attrs = attrs[offset:offset + attr_len], attrs[offset + attr_len:]
+        n_attrs += 1
+
+        if attr_type == ATTR_MP_REACH_NLRI:
+            afi, safi, nh_len = struct.unpack('!HBB', value[:4])
+            if afi in NETWORK_CLASSES and safi == SAFI_UNICAST:
+                # skip the next hop and the reserved octet
+                announced += parse_nlri(value[4 + nh_len + 1:], afi)
+        elif attr_type == ATTR_MP_UNREACH_NLRI:
+            afi, safi = struct.unpack('!HB', value[:3])
+            if afi in NETWORK_CLASSES and safi == SAFI_UNICAST:
+                if len(value) == 3:
+                    eor.add(afi)
+                withdrawn += parse_nlri(value[3:], afi)
+
+    # an End-of-RIB marker for other families is an UPDATE with nothing but an empty MP_UNREACH_NLRI
+    if n_attrs != 1 or withdrawn_len != 0:
+        eor = set()
+
+    return announced, withdrawn, eor
+
+
+def collect(args):
+    """Runs one BGP session and returns the received prefixes."""
+    families = [AFI_INET] if args.no_inet6 else [AFI_INET, AFI_INET6]
+    source = (args.local_address, 0) if args.local_address else None
+
+    sock = socket.create_connection((args.peer, args.port), timeout=args.connect_timeout, source_address=source)
+    session = Session(sock)
+
+    try:
+        session.send(MSG_OPEN, open_message(args.local_as, args.hold_time, args.router_id, families))
+        msg = session.recv(args.connect_timeout)
+        if msg is None:
+            raise BgpError('timed out waiting for OPEN')
+        if msg[0] == MSG_NOTIFICATION:
+            raise BgpError(notification(msg[1]))
+        if msg[0] != MSG_OPEN:
+            raise BgpError(f'expected OPEN, got message type {msg[0]}')
+
+        peer_as, peer_hold_time, caps = parse_open(msg[1])
+        if args.peer_as is not None and peer_as != args.peer_as:
+            session.send(MSG_NOTIFICATION, struct.pack('!BB', 2, 2))  # OPEN Message Error / Bad Peer AS
+            raise BgpError(f'peer AS is {peer_as}, expected {args.peer_as}')
+
+        # without any Multiprotocol capability, a peer only speaks IPv4 unicast (RFC 4760)
+        peer_families = {struct.unpack('!HBB', v[:4])[0] for v in caps.get(CAP_MULTIPROTOCOL, []) if v[3] == SAFI_UNICAST}
+        if CAP_MULTIPROTOCOL not in caps:
+            peer_families = {AFI_INET}
+        families = [afi for afi in families if afi in peer_families]
+        if not families:
+            raise BgpError('no address family in common with the peer')
+
+        hold_time = min(args.hold_time, peer_hold_time)
+        keepalive_interval = hold_time / 3 if hold_time else None
+        # a peer announcing Graceful Restart sends End-of-RIB after its initial updates (RFC 4724)
+        expect_eor = CAP_GRACEFUL_RESTART in caps
+
+        log(f'session up with AS{peer_as} ({", ".join(FAMILY_NAMES[afi] for afi in families)}), '
+            f'{"waiting for End-of-RIB" if expect_eor else f"no End-of-RIB support, stopping after {args.idle_timeout}s idle"}')
+
+        session.send(MSG_KEEPALIVE)
+
+        rib = set()
+        pending_eor = set(families)
+        now = time.monotonic()
+        deadline = now + args.timeout
+        last_rx = last_update = now
+        next_keepalive = now + (keepalive_interval or 0)
+
+        while True:
+            if keepalive_interval and now >= next_keepalive:
+                session.send(MSG_KEEPALIVE)
+                next_keepalive = now + keepalive_interval
+
+            wakeups = [deadline]
+            if keepalive_interval:
+                wakeups.append(next_keepalive)
+            if hold_time:
+                wakeups.append(last_rx + hold_time)
+            if not expect_eor:
+                wakeups.append(last_update + args.idle_timeout)
+
+            msg = session.recv(max(min(wakeups) - time.monotonic(), 0))
+            now = time.monotonic()
+
+            if msg is not None:
+                last_rx = now
+                msg_type, body = msg
+
+                if msg_type == MSG_NOTIFICATION:
+                    raise BgpError(notification(body))
+
+                if msg_type == MSG_UPDATE:
+                    announced, withdrawn, eor = parse_update(body)
+                    rib.difference_update(withdrawn)
+                    rib.update(announced)
+                    pending_eor -= eor
+                    if not eor:
+                        last_update = now
+
+            if expect_eor and not pending_eor:
+                break
+            if not expect_eor and now - last_update >= args.idle_timeout:
+                break
+            if hold_time and now - last_rx >= hold_time:
+                raise BgpError('hold timer expired')
+            if now >= deadline:
+                raise BgpError(f'timed out after {args.timeout}s, End-of-RIB missing for '
+                               f'{", ".join(FAMILY_NAMES[afi] for afi in pending_eor)}')
+
+        session.send(MSG_NOTIFICATION, struct.pack('!BB', 6, 2))  # Cease / Administrative Shutdown
+        return rib
+    finally:
+        sock.close()
+
+
+def shortest_prefixes(prefixes):
+    """Drops every prefix covered by a shorter one, so each address matches exactly one prefix: the shortest."""
+    result = []
+
+    for version in (4, 6):
+        last = None
+        # sorted by address, then by length: a prefix comes right before the prefixes it covers
+        for net in sorted(p for p in prefixes if p.version == version):
+            if last is not None and net.subnet_of(last):
+                continue
+
+            result.append(net)
+            last = net
+
+    return result
+
+
+def usable(net):
+    if net.prefixlen == 0:
+        log(f'skipping default route {net}: it would cover every address')
+        return False
+
+    if net.version == 6 and net.network_address.ipv4_mapped is not None:
+        log(f'skipping IPv4-mapped prefix {net}')
+        return False
+
+    return True
+
+
+def render(template, placeholder, prefixes):
+    if placeholder not in template:
+        raise SystemExit(f'bgp-prefix-sync: error: placeholder "{placeholder}" not found in template')
+
+    lines = []
+
+    for line in template.splitlines(keepends=True):
+        if placeholder not in line:
+            lines.append(line)
+            continue
+
+        indent = line[:len(line) - len(line.lstrip())]
+        lines += [f'{indent}{p};\n' for p in prefixes]
+
+    return ''.join(lines)
+
+
+def write_if_changed(path, content, template):
+    try:
+        with open(path) as f:
+            if f.read() == content:
+                return False
+    except FileNotFoundError:
+        pass
+
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix='.bgp-prefix-sync.')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(content)
+
+        # keep the permissions of the config (or of the template): it may hold API keys
+        os.chmod(tmp, os.stat(path if os.path.exists(path) else template).st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+    return True
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--peer', required=True, help='router address to connect to')
+    p.add_argument('--port', type=int, default=179)
+    p.add_argument('--local-address', help='source address of the session')
+    p.add_argument('--local-as', type=int, required=True)
+    p.add_argument('--peer-as', type=int, help='fail unless the router uses this AS')
+    p.add_argument('--router-id', required=True, help='BGP identifier (an IPv4 address)')
+    p.add_argument('--hold-time', type=int, default=90)
+    p.add_argument('--no-inet6', action='store_true', help='only negotiate IPv4 unicast')
+    p.add_argument('--connect-timeout', type=int, default=30, help='seconds to wait for TCP and the OPEN message')
+    p.add_argument('--timeout', type=int, default=600, help='seconds to wait for the full table')
+    p.add_argument('--idle-timeout', type=int, default=30,
+                   help='for peers without End-of-RIB support: table is complete after this many seconds without updates')
+    p.add_argument('--min-prefixes', type=int, default=1, help='leave the output untouched if fewer prefixes are received')
+    p.add_argument('--template', help='apermon config template')
+    p.add_argument('--output', help='apermon config to write')
+    p.add_argument('--placeholder', default='@BGP_PREFIXES@')
+    p.add_argument('--reload-cmd', help='shell command to run after the output changed, e.g. "systemctl restart apermon"')
+
+    args = p.parse_args()
+    if bool(args.template) != bool(args.output):
+        p.error('--template and --output go together')
+
+    return args
+
+
+def main():
+    args = parse_args()
+
+    try:
+        received = collect(args)
+    except (OSError, BgpError, struct.error, IndexError, ValueError) as e:
+        log(f'error: {args.peer}: {e}')
+        return 1
+
+    prefixes = shortest_prefixes([p for p in received if usable(p)])
+    log(f'received {len(received)} prefixes, {len(prefixes)} after dropping covered prefixes')
+
+    if len(prefixes) < args.min_prefixes:
+        log(f'error: fewer than {args.min_prefixes} prefixes, leaving the config untouched')
+        return 1
+
+    if not args.template:
+        print('\n'.join(str(p) for p in prefixes))
+        return 0
+
+    with open(args.template) as f:
+        config = render(f.read(), args.placeholder, prefixes)
+
+    if not write_if_changed(args.output, config, args.template):
+        log(f'{args.output} unchanged')
+        return 0
+
+    log(f'{args.output} updated')
+    if args.reload_cmd:
+        return subprocess.run(args.reload_cmd, shell=True).returncode
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

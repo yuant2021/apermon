@@ -333,6 +333,19 @@ apermon_config_prefix_list_elements *new_prefix_inet6(const struct in6_addr *add
     return prefix;
 }
 
+apermon_config_prefix_list_elements *reverse_prefix_list_elements(apermon_config_prefix_list_elements *el) {
+    apermon_config_prefix_list_elements *prev = NULL, *next;
+
+    while (el != NULL) {
+        next = el->next;
+        el->next = prev;
+        prev = el;
+        el = next;
+    }
+
+    return prev;
+}
+
 apermon_cond_func_list *new_cond_func_list_element(apermon_cond_func func, void *arg) {
     apermon_cond_func_list *el = (apermon_cond_func_list *) malloc(sizeof(apermon_cond_func_list));
     memset(el, 0, sizeof(apermon_cond_func_list));
