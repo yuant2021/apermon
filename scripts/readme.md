@@ -74,6 +74,53 @@ env {
 - If the lookup fails or the target has no origin ASN, the route is announced without the prepend.
 - `ipinfo.sh` must be kept in the same directory with `exabgp.sh`.
 
+### junos-route-filter.py
+
+Adds banned prefixes to a Junos route-filter-list over NETCONF, i.e., runs the equivalent of
+
+```
+set policy-options route-filter-list bgp_anti_ddos 192.0.2.0/24
+commit
+```
+
+for each `ban` event, e.g., to have an export policy that matches `route-filter-list bgp_anti_ddos` divert the prefix to a scrubbing service. Entries are only added, never removed; `unban` events are ignored. The prefix added is `PREFIX` from apermon: the prefix containing the banned host for `host` and `prefix` aggregators, and every prefix of the net for `net` aggregators.
+
+It needs python3 and [ncclient](https://github.com/ncclient/ncclient) (`pip install ncclient`, or `apt install python3-ncclient`), and NETCONF enabled on the router (`set system services netconf ssh`). Add the script as a script for your action:
+
+```
+actions {
+    my-action {
+        script "/path/to/junos-route-filter.py" {
+            events [ ban ];
+            env {
+                NETCONF_HOST            = "10.66.66.1";
+                NETCONF_USERNAME        = "apermon";
+                NETCONF_KEY_FILE        = "/etc/apermon/id_ed25519";
+                JUNOS_ROUTE_FILTER_LIST = "bgp_anti_ddos";
+                JUNOS_SPOOL_DIR         = "/var/lib/apermon/junos";
+            }
+        }
+        ...
+    }
+    ...
+}
+```
+
+Environment variables:
+
+- `NETCONF_HOST`, `NETCONF_PORT` (default `830`), `NETCONF_USERNAME`: NETCONF over SSH session to the router.
+- `NETCONF_PASSWORD` or `NETCONF_KEY_FILE`: SSH password or private key file.
+- `NETCONF_HOSTKEY_VERIFY`: the router's host key is checked against `~/.ssh/known_hosts` of the user running apermon. Set to `0` to skip the check.
+- `NETCONF_TIMEOUT`: RPC timeout in seconds, default `120`.
+- `JUNOS_ROUTE_FILTER_LIST`: name of the route-filter-list.
+- `JUNOS_MATCH_TYPE`: optional match type appended to each entry, e.g., `exact` or `orlonger`.
+- `JUNOS_SPOOL_DIR`: directory for the spool and lock files. Must be writable by `apermon`.
+- `JUNOS_COMMIT_DEADLINE`: how long, in seconds, a failed lock/commit is retried, default `300`.
+
+Commit races: apermon runs one script per event, concurrently, so a burst of bans would otherwise open many NETCONF sessions that fight over the candidate configuration (`configuration database locked`, `commit in progress`). Each run instead appends its prefixes to a spool in `JUNOS_SPOOL_DIR` and waits for a local commit lock; the holder commits everything spooled so far in one commit, and runs whose prefixes were already committed exit right away. On the router, the candidate configuration is locked (like `configure exclusive`) for the load and the commit. If that fails because another user holds the lock, has uncommitted changes, or is committing, the commit is retried with backoff until `JUNOS_COMMIT_DEADLINE`; prefixes that still fail stay in the spool and go out with the next event.
+
+apermon passes no `PATH` to scripts. If ncclient lives in a virtualenv, set `PATH = "/path/to/venv/bin:/usr/bin:/bin";` in `env` so `#!/usr/bin/env python3` picks the virtualenv's python.
+
 ### ipinfo.sh
 
 Looks up the origin ASN of addresses with the [IPinfo Lite API](https://ipinfo.io/developers/lite-api) (free, unlimited; [get a token](https://ipinfo.io/signup)). Used by `summary.sh` and `exabgp.sh`; it needs `curl` and `jq`. Lookups are disabled when `IPINFO_TOKEN` is not set. Environment variables:
