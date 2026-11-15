@@ -48,6 +48,10 @@ dump-interval {
     return DUMP_INTERVAL;
 }
 
+telegraf {
+    return TELEGRAF;
+}
+
 agents {
     return AGENTS;
 }

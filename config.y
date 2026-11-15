@@ -49,7 +49,7 @@
     apermon_config_action_set *action_set;
 }
 
-%token OPTIONS LISTEN MIN_BAN_TIME BURST_PERIOD STATUS_FILE DUMP_INTERVAL
+%token OPTIONS LISTEN MIN_BAN_TIME BURST_PERIOD STATUS_FILE DUMP_INTERVAL TELEGRAF
 %token LBRACE RBRACE SEMICOLON LBRACK RBRACK
 %token SFLOW V5
 %token AGENTS ADDRESSES SAMPLE_RATE_CAP
@@ -75,7 +75,7 @@
 %type <prefix_list_element> prefix prefix_elements
 %type <action> action action_list
 %type <action_script> action_script action_scripts
-%type <str> string
+%type <str> string telegraf_host
 %type <trigger> trigger trigger_list
 %type <prefix_lists_set> prefix_lists_set prefix_lists_set_element
 %type <cond_func_list_element> filter filter_list
@@ -531,6 +531,31 @@ option_items
         get_config()->status_file = strdup($2);
         get_config()->status_dump_interval = $4;
         free($2);
+    }
+    | TELEGRAF telegraf_host NUMBER DUMP_INTERVAL NUMBER SEMICOLON {
+        if ($5 == 0) {
+            store_retval(-1);
+            log_error("telegraf dump-interval must be at least 1 second.\n");
+            YYERROR;
+        }
+
+        ERR_IF_NULL(get_config()->telegraf_addr = resolve_udp($2, $3));
+        get_config()->telegraf_dump_interval = $5;
+        free($2);
+    }
+
+telegraf_host
+    : IDENT
+    | QUOTED_STRING
+    | IP {
+        char addr[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &$1, addr, sizeof(addr));
+        $$ = strdup(addr);
+    }
+    | IP6 {
+        char addr[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &$1, addr, sizeof(addr));
+        $$ = strdup(addr);
     }
 
 option_item_listens

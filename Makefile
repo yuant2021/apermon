@@ -1,6 +1,6 @@
 CFLAGS+=-Wall -Wextra -march=native
 LDFLAGS+=-lm
-OBJS=apermon.o condition.o context.o extract.o flow.o hash.o net.o prefix-list.o sflow.o trigger.o config.tab.o config.yy.o config-public.o config-internal.o
+OBJS=apermon.o condition.o context.o extract.o flow.o hash.o net.o prefix-list.o sflow.o trigger.o telegraf.o config.tab.o config.yy.o config-public.o config-internal.o
 FLEX=flex
 BISON=bison
 

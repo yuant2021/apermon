@@ -281,19 +281,26 @@ apermon_config *get_config() {
     return _config;
 }
 
-apermon_config_listens *listen_fill_gai(apermon_config_listens *listen, const char *host, uint16_t port) {
+struct addrinfo *resolve_udp(const char *host, uint16_t port) {
+    struct addrinfo *addr;
     char port_str[6];
     memset(port_str, 0, sizeof(port_str));
     sprintf(port_str, "%u", port);
 
-    int ret = getaddrinfo(host, port_str, &_gai_hints, &listen->addr);
+    int ret = getaddrinfo(host, port_str, &_gai_hints, &addr);
 
     if (ret != 0) {
         log_fatal("getaddrinfo() on \"%s\" failed: %s\n", host, gai_strerror(ret));
         return NULL;
     }
 
-    return listen;
+    return addr;
+}
+
+apermon_config_listens *listen_fill_gai(apermon_config_listens *listen, const char *host, uint16_t port) {
+    listen->addr = resolve_udp(host, port);
+
+    return listen->addr == NULL ? NULL : listen;
 }
 
 apermon_config_prefix_list_elements *new_prefix_inet(const struct in_addr *addr, uint8_t prefix_len) {

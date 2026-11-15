@@ -110,6 +110,7 @@ options {
     min-ban-time <time-in-second>;
     burst-period <time-in-second>;
     status-file "<file-path>" dump-interval <time-in-second>;
+    telegraf <host> <port> dump-interval <time-in-second>;
 }
 ```
 
@@ -120,6 +121,7 @@ Notes:
 - `min-ban-time` sets how long a host or network should be kept "banned" after it stops triggering thresholds. `0` to disable banning.
 - `burst-period` sets how long hosts and networks are allowed to burst beyond set thresholds without getting banned. `0` to disable bursting. 
 - `status-file` dumps bps/pps of each host/net of each trigger to given file every `<time-in-second>` seconds. Status file are just CSV, but can be viewed in a human-friendly way using the `utils/status-viewer` script.
+- `telegraf` sends the same bps/pps, the number of banned targets, and ban/unban events as InfluxDB line protocol over UDP to `<host>:<port>` (e.g., telegraf, which writes them to InfluxDB) every `<time-in-second>` seconds. Quote host names (`"telegraf.example.com"`). See [telegraf / InfluxDB](#telegraf--influxdb).
 
 **`agents`** - defines agent(s) to listen samples from. Syntax:
 
@@ -384,3 +386,47 @@ set policy-options policy-statement apermon-prefixes then reject
 ```
 
 Routes learned over iBGP are not re-advertised to iBGP neighbors; to export them to the collector, make the group a route reflector client group (`cluster`) or use an eBGP session.
+
+### telegraf / InfluxDB
+
+With `telegraf <host> <port> dump-interval <time-in-second>;` in `options`, apermon pushes metrics in [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v2/reference/syntax/line-protocol/) over UDP. Receive them with telegraf's `socket_listener` and send them on with any telegraf output, e.g. InfluxDB:
+
+```
+[[inputs.socket_listener]]
+  service_address = "udp://127.0.0.1:8094"
+  data_format = "influx"
+
+[[outputs.influxdb_v2]]
+  urls = ["http://127.0.0.1:8086"]
+  token = "..."
+  organization = "..."
+  bucket = "apermon"
+```
+
+```
+options {
+    ...
+    telegraf 127.0.0.1 8094 dump-interval 10;
+}
+```
+
+Measurements (integer fields; timestamps in nanoseconds):
+
+| measurement | tags | fields | sent |
+|---|---|---|---|
+| `apermon_traffic` | `trigger`, `aggregator`, `net`, `target`, `prefix` (host aggregator only) | `in_bps`, `out_bps`, `in_pps`, `out_pps` | every dump interval, for each host/prefix/net with samples in the last 10 seconds (same as the status file) |
+| `apermon_trigger` | `trigger` | `targets` (hosts/prefixes/nets in `apermon_traffic`), `banned` (currently banned targets) | every dump interval, for each trigger |
+| `apermon_event` | `trigger`, `aggregator`, `net`, `target`, `prefix` (host aggregator only), `type` (`ban` or `unban`) | `ban`: `in_bps`, `out_bps`, `in_pps`, `out_pps`; `unban`: `peak_in_bps`, `peak_out_bps`, `peak_in_pps`, `peak_out_pps`, `duration` (seconds) | at each ban and unban |
+
+`target` is the address for the `host` aggregator, the prefix for `prefix`, and the net name for `net`; `net` is the name of the prefix list the target belongs to. Example:
+
+```
+apermon_traffic,aggregator=host,net=my-network,prefix=192.0.2.0/24,target=192.0.2.5,trigger=protect-my-network in_bps=304607577i,out_bps=0i,in_pps=25382i,out_pps=0i 1794742855000000000
+apermon_event,aggregator=host,net=my-network,prefix=192.0.2.0/24,target=192.0.2.5,trigger=protect-my-network,type=ban in_bps=213151828i,out_bps=0i,in_pps=17762i,out_pps=0i 1794742857000000000
+```
+
+Notes:
+
+- UDP is fire-and-forget: apermon never waits on telegraf, and metrics sent while telegraf is down are lost. Datagrams are kept under 1400 bytes, so a remote telegraf works without IP fragmentation.
+- With `aggregate-type host`, every active host is a series. On large networks, this is a lot of series in InfluxDB; consider a longer `dump-interval`, a short retention for `apermon_traffic`, or `prefix`/`net` triggers for dashboards.
+- `apermon_event` points work as Grafana annotations (e.g., filter on `type = 'ban'`, text from `target`).

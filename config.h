@@ -144,6 +144,9 @@ typedef struct _apermon_config {
 
     char *status_file;
     uint32_t status_dump_interval;
+
+    struct addrinfo *telegraf_addr; /* udp destination of line protocol metrics; the first address is used */
+    uint32_t telegraf_dump_interval;
 } apermon_config;
 
 int parse_config(const char *filename, apermon_config **config);

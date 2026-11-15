@@ -14,6 +14,7 @@ int get_retval();
 apermon_config *get_config();
 
 apermon_config_listens *listen_fill_gai(apermon_config_listens *listen, const char *host, uint16_t port);
+struct addrinfo *resolve_udp(const char *host, uint16_t port);
 apermon_config_prefix_list_elements *new_prefix_inet(const struct in_addr *addr, uint8_t prefix_len);
 apermon_config_prefix_list_elements *new_prefix_inet6(const struct in6_addr *addr, uint8_t prefix_len);
 apermon_config_prefix_list_elements *reverse_prefix_list_elements(apermon_config_prefix_list_elements *el);

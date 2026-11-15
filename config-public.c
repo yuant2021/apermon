@@ -49,6 +49,10 @@ void free_config(apermon_config *config) {
     if (config->status_file) {
         free(config->status_file);
     }
+
+    if (config->telegraf_addr) {
+        freeaddrinfo(config->telegraf_addr);
+    }
     
     while (l != NULL) {
         if (prev_l != NULL) {

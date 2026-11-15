@@ -10,6 +10,7 @@
 #include "condition.h"
 #include "net.h"
 #include "prefix-list.h"
+#include "telegraf.h"
 
 static const apermon_config *_config;
 static time_t _last_status_dump;
@@ -276,6 +277,8 @@ static void unfire_trigger(const apermon_trigger_state *ts) {
 
     log_debug("trigger %s unfired\n", ts->trigger->name);
 
+    telegraf_unban(ts);
+
     if (actions == NULL) {
         log_warn("triggered '%s' fired but no action(s) configured\n", config->name);
         return;
@@ -366,6 +369,8 @@ static void fire_trigger(const apermon_config_triggers *config, const apermon_ag
     }
 
     ts->flags |= APERMON_TRIGGER_FLAG_FIRED;
+
+    telegraf_ban(config, flow);
 
     if (actions == NULL) {
         log_warn("triggered '%s' fired but no action(s) configured\n", config->name);
@@ -490,6 +495,8 @@ void triggers_timed_callback() {
         _last_status_dump = now.tv_sec;
         status_dump();
     }
+
+    telegraf_timed_callback(&now);
 }
 
 int run_trigger(const apermon_config_triggers *config, const apermon_flows *flows) {

@@ -4,6 +4,7 @@
 #include "config.h"
 #include "net.h"
 #include "trigger.h"
+#include "telegraf.h"
 
 static const apermon_net_handler handlers[] = {
     handle_sflow_packet
@@ -42,6 +43,11 @@ int main(int argc, char **argv) {
 
     init_sflow(config);
     init_triggers(config);
+
+    ret = init_telegraf(config);
+    if (ret < 0) {
+        return 1;
+    }
 
     ret = start_servers();
     if (ret < 0) {
