@@ -68,6 +68,25 @@ actions {
                 EXABGP_COMMUNITIES = "65535:666 65001:666";
                 EXABGP_NEXTHOP = "10.66.66.66";
                 LOCKFILE = "/tmp/apermon-exabgp.lock";
+                # prepend the origin ASN of the target (looked up with ipinfo) to the
+                # announced AS path, unless it is one of ours
+                EXABGP_PREPEND_ORIGIN_ASN = "1";
+                EXABGP_PREPEND_SKIP_ASNS = "65001";
+                IPINFO_TOKEN = "...";
+            }
+        }
+    }
+    scrubbing {
+        # add the banned prefix to a junos route-filter-list over netconf
+        # (add-only, so no unban event)
+        script "/opt/apermon/scripts/junos-route-filter.py" {
+            events [ ban ];
+            env {
+                NETCONF_HOST = "10.66.66.1";
+                NETCONF_USERNAME = "apermon";
+                NETCONF_KEY_FILE = "/etc/apermon/id_ed25519";
+                JUNOS_ROUTE_FILTER_LIST = "bgp_anti_ddos";
+                JUNOS_SPOOL_DIR = "/var/lib/apermon/junos";
             }
         }
     }
@@ -97,6 +116,8 @@ actions {
                 TO = "noc@example.com";
                 # mailgun script will eval echo the SUBJECT variable to expand var refs
                 SUBJECT = "[apermon] $TRIGGER: $TYPE $TARGET";
+                # optional: show ASNs in the summary
+                IPINFO_TOKEN = "...";
             }
         }
         script "/opt/apermon/scripts/telegram.sh" {
@@ -104,6 +125,7 @@ actions {
             env {
                 BOT_TOKEN = "...";
                 CHAT_ID = "...";
+                IPINFO_TOKEN = "...";
             }
         }
     }
