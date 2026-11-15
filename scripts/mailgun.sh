@@ -14,4 +14,4 @@ curl -s --user "$API_KEY" \
     -F from="$FROM" \
     -F to="$TO" \
     -F subject="$SUBJECT" \
-    -F text="`TOP_FLOWS_COUNT=100 ./summary.sh`"
+    -F text="`./summary.sh`"
