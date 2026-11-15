@@ -58,21 +58,21 @@ The variables should be self-explanatory. Note that:
 
 #### origin ASN prepend
 
-Upstream blackhole sessions often only accept a route when its AS path ends in the AS that originates the prefix (e.g., your customer's AS). `exabgp.sh` can look up the origin ASN of every blackholed target with [ipinfo.sh](#ipinfosh) and prepend it to the announced AS path:
+Upstream blackhole sessions often only accept a route when its AS path ends in the AS that originates the prefix (e.g., your customer's AS). `exabgp.sh` can look up the origin ASN of every blackholed target with [ipinfo.py](#ipinfopy) and prepend it to the announced AS path:
 
 ```
 env {
     ...
     EXABGP_PREPEND_ORIGIN_ASN   = "1";
     EXABGP_PREPEND_SKIP_ASNS    = "65001";
-    IPINFO_TOKEN                = "...";
+    IPINFO_MMDB                 = "/var/lib/apermon/ipinfo_lite.mmdb";
 }
 ```
 
 - `EXABGP_PREPEND_ORIGIN_ASN=1` turns the lookup on. Announcements become `announce route 192.0.2.1/32 ... as-path [ 64500 ]`.
 - `EXABGP_PREPEND_SKIP_ASNS` lists origin ASNs that are announced without the prepend. Put your own ASN here: a router drops routes whose AS path contains its own AS.
 - If the lookup fails or the target has no origin ASN, the route is announced without the prepend.
-- `ipinfo.sh` must be kept in the same directory with `exabgp.sh`.
+- `ipinfo.py` must be kept in the same directory with `exabgp.sh`.
 
 ### junos-route-filter.py
 
@@ -121,20 +121,25 @@ Commit races: apermon runs one script per event, concurrently, so a burst of ban
 
 apermon passes no `PATH` to scripts. If ncclient lives in a virtualenv, set `PATH = "/path/to/venv/bin:/usr/bin:/bin";` in `env` so `#!/usr/bin/env python3` picks the virtualenv's python.
 
-### ipinfo.sh
+### ipinfo.py
 
-Looks up the origin ASN of addresses with the [IPinfo Lite API](https://ipinfo.io/developers/lite-api) (free, unlimited; [get a token](https://ipinfo.io/signup)). Used by `summary.sh` and `exabgp.sh`; it needs `curl` and `jq`. Lookups are disabled when `IPINFO_TOKEN` is not set. Environment variables:
+Looks up the origin ASN of addresses in a local copy of the [IPinfo Lite database](https://ipinfo.io/developers/ipinfo-lite-database) (MMDB format), so lookups need no network access. Used by `summary.sh` and `exabgp.sh`. It needs python3 and the [maxminddb](https://github.com/maxmind/MaxMind-DB-Reader-python) module (`pip install maxminddb`, or `apt install python3-maxminddb`). Lookups are disabled when `IPINFO_MMDB` is not set.
 
-- `IPINFO_TOKEN`: IPinfo access token.
-- `IPINFO_CACHE_DIR`: cache directory, default `${TMPDIR:-/tmp}/apermon-ipinfo`. Must be writable by `apermon`.
-- `IPINFO_CACHE_TTL`: cache lifetime in seconds, default `86400`.
-- `IPINFO_TIMEOUT`: API timeout in seconds, default `5`.
+- `IPINFO_MMDB`: path of `ipinfo_lite.mmdb`. Must be readable by `apermon`.
+
+The database is free with an [IPinfo token](https://ipinfo.io/signup) and updated daily. Refresh it from cron, e.g. in `/etc/cron.d/apermon` (`mv` replaces the file atomically, lookups pick up the new copy on their next run):
 
 ```
-$ IPINFO_TOKEN=... ./ipinfo.sh 8.8.8.8 1.1.1.1
+0 3 * * * root curl -sfL -o /var/lib/apermon/ipinfo_lite.mmdb.tmp "https://ipinfo.io/data/ipinfo_lite.mmdb?token=..." && mv /var/lib/apermon/ipinfo_lite.mmdb.tmp /var/lib/apermon/ipinfo_lite.mmdb
+```
+
+```
+$ IPINFO_MMDB=/var/lib/apermon/ipinfo_lite.mmdb ./ipinfo.py 8.8.8.8 1.1.1.1
 8.8.8.8	AS15169	Google LLC
 1.1.1.1	AS13335	Cloudflare, Inc.
 ```
+
+apermon passes no `PATH` to scripts. If maxminddb lives in a virtualenv, set `PATH` in the `env` of the scripts that look up ASNs, as for [junos-route-filter.py](#junos-route-filterpy).
 
 ### summary.sh
 
@@ -159,7 +164,7 @@ top source ASNs:
   13.2%  AS64502 Other Networks
 ```
 
-ASNs are only shown when `IPINFO_TOKEN` is set (see [ipinfo.sh](#ipinfosh)); set it in the `env` of the script that calls `summary.sh`.
+ASNs are only shown when `IPINFO_MMDB` is set (see [ipinfo.py](#ipinfopy)); set it in the `env` of the script that calls `summary.sh`.
 
 ### mailgun.sh
 
@@ -186,7 +191,7 @@ actions {
 
 Note that:
 
-- The script must be kept in the same directory with `summary.sh` and `ipinfo.sh` scripts.
+- The script must be kept in the same directory with `summary.sh` and `ipinfo.py` scripts.
 - `SUBJECT` env will be `eval` by the script (i.e., `eval echo "$SUBJECT"`) to expand the variables.
 
 ### telegram.sh
@@ -209,4 +214,4 @@ actions {
 }
 ```
 
-The summary is sent as an HTML `<pre>` block so its columns stay aligned. Note that the script must be kept in the same directory with `summary.sh` and `ipinfo.sh` scripts.
+The summary is sent as an HTML `<pre>` block so its columns stay aligned. Note that the script must be kept in the same directory with `summary.sh` and `ipinfo.py` scripts.

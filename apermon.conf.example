@@ -68,11 +68,11 @@ actions {
                 EXABGP_COMMUNITIES = "65535:666 65001:666";
                 EXABGP_NEXTHOP = "10.66.66.66";
                 LOCKFILE = "/tmp/apermon-exabgp.lock";
-                # prepend the origin ASN of the target (looked up with ipinfo) to the
-                # announced AS path, unless it is one of ours
+                # prepend the origin ASN of the target (looked up in the local ipinfo
+                # lite database) to the announced AS path, unless it is one of ours
                 EXABGP_PREPEND_ORIGIN_ASN = "1";
                 EXABGP_PREPEND_SKIP_ASNS = "65001";
-                IPINFO_TOKEN = "...";
+                IPINFO_MMDB = "/var/lib/apermon/ipinfo_lite.mmdb";
             }
         }
     }
@@ -117,7 +117,7 @@ actions {
                 # mailgun script will eval echo the SUBJECT variable to expand var refs
                 SUBJECT = "[apermon] $TRIGGER: $TYPE $TARGET";
                 # optional: show ASNs in the summary
-                IPINFO_TOKEN = "...";
+                IPINFO_MMDB = "/var/lib/apermon/ipinfo_lite.mmdb";
             }
         }
         script "/opt/apermon/scripts/telegram.sh" {
@@ -125,7 +125,7 @@ actions {
             env {
                 BOT_TOKEN = "...";
                 CHAT_ID = "...";
-                IPINFO_TOKEN = "...";
+                IPINFO_MMDB = "/var/lib/apermon/ipinfo_lite.mmdb";
             }
         }
     }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prints a human-readable summary of an apermon event. Meant to be called by other scripts (e.g., mailgun, telegram)
-# to generate the message body. ASNs are looked up with ipinfo.sh when IPINFO_TOKEN is set.
+# to generate the message body. ASNs are looked up with ipinfo.py when IPINFO_MMDB is set.
 
 cd "`dirname "$0"`"
 
@@ -40,7 +40,7 @@ header() {
     if [ "$AGGREGATOR" = "net" ]; then
         row 'prefix' "`prefixes`"
     else
-        target_asn="`./ipinfo.sh "$TARGET" | cut -f2- | tr '\t' ' '`"
+        target_asn="`./ipinfo.py "$TARGET" | cut -f2- | tr '\t' ' '`"
         row 'target' "$TARGET${target_asn:+  $target_asn}"
         row 'prefix' "$PREFIX ($NET)"
     fi
@@ -110,7 +110,7 @@ header() {
     row "$remote_label" "`top remote 1000 | wc -l`"
 
     # aggregate remote addresses by origin ASN
-    remote_asns="`top remote 1000 | cut -f2 | xargs ./ipinfo.sh`"
+    remote_asns="`top remote 1000 | cut -f2 | xargs ./ipinfo.py`"
     [ -n "$remote_asns" ] && {
         printf '\ntop %s ASNs:\n' "$remote"
         awk -F'\t' 'NR == FNR { asn[$1] = $2 " " $3; next } $2 in asn { share[asn[$2]] += $1 } END {

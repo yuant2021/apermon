@@ -38,7 +38,7 @@ EXABGP_WITHDRAW_TEMPLATE="withdraw route %s next-hop $EXABGP_NEXTHOP\n"
         addrs+=("${target%/*}")
     done
 
-    ipinfo="`dirname "$0"`/ipinfo.sh"
+    ipinfo="`dirname "$0"`/ipinfo.py"
     origins="`"$ipinfo" "${addrs[@]}"`"
 }
 
