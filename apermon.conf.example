@@ -10,8 +10,9 @@ options {
     status-file "/var/run/apermon.status" dump-interval 1;
 
     # send bps/pps, banned counts and ban/unban events as influxdb line
-    # protocol over udp to telegraf (inputs.socket_listener) every 10 seconds
-    telegraf 127.0.0.1 8094 dump-interval 10;
+    # protocol over udp to telegraf (inputs.socket_listener) every 10 seconds;
+    # bps/pps only for the 20 targets of each trigger closest to firing it
+    telegraf 127.0.0.1 8094 dump-interval 10 top 20;
 }
 # define agnets to accept sflow packets from
 agents {

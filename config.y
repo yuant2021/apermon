@@ -49,7 +49,7 @@
     apermon_config_action_set *action_set;
 }
 
-%token OPTIONS LISTEN MIN_BAN_TIME BURST_PERIOD STATUS_FILE DUMP_INTERVAL TELEGRAF
+%token OPTIONS LISTEN MIN_BAN_TIME BURST_PERIOD STATUS_FILE DUMP_INTERVAL TELEGRAF TOP
 %token LBRACE RBRACE SEMICOLON LBRACK RBRACK
 %token SFLOW V5
 %token AGENTS ADDRESSES SAMPLE_RATE_CAP
@@ -79,7 +79,7 @@
 %type <trigger> trigger trigger_list
 %type <prefix_lists_set> prefix_lists_set prefix_lists_set_element
 %type <cond_func_list_element> filter filter_list
-%type <u64> proto_name number_with_unit unit
+%type <u64> proto_name number_with_unit unit telegraf_top
 %type <action_set> action_set action_set_element
 
 %%
@@ -532,7 +532,7 @@ option_items
         get_config()->status_dump_interval = $4;
         free($2);
     }
-    | TELEGRAF telegraf_host NUMBER DUMP_INTERVAL NUMBER SEMICOLON {
+    | TELEGRAF telegraf_host NUMBER DUMP_INTERVAL NUMBER telegraf_top SEMICOLON {
         if ($5 == 0) {
             store_retval(-1);
             log_error("telegraf dump-interval must be at least 1 second.\n");
@@ -541,8 +541,13 @@ option_items
 
         ERR_IF_NULL(get_config()->telegraf_addr = resolve_udp($2, $3));
         get_config()->telegraf_dump_interval = $5;
+        get_config()->telegraf_top_n = $6;
         free($2);
     }
+
+telegraf_top
+    : { $$ = 0; }
+    | TOP NUMBER { $$ = $2; }
 
 telegraf_host
     : IDENT

@@ -110,7 +110,7 @@ options {
     min-ban-time <time-in-second>;
     burst-period <time-in-second>;
     status-file "<file-path>" dump-interval <time-in-second>;
-    telegraf <host> <port> dump-interval <time-in-second>;
+    telegraf <host> <port> dump-interval <time-in-second> [top <number>];
 }
 ```
 
@@ -389,7 +389,7 @@ Routes learned over iBGP are not re-advertised to iBGP neighbors; to export them
 
 ### telegraf / InfluxDB
 
-With `telegraf <host> <port> dump-interval <time-in-second>;` in `options`, apermon pushes metrics in [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v2/reference/syntax/line-protocol/) over UDP. Receive them with telegraf's `socket_listener` and send them on with any telegraf output, e.g. InfluxDB:
+With `telegraf <host> <port> dump-interval <time-in-second> [top <number>];` in `options`, apermon pushes metrics in [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v2/reference/syntax/line-protocol/) over UDP. Receive them with telegraf's `socket_listener` and send them on with any telegraf output, e.g. InfluxDB:
 
 ```
 [[inputs.socket_listener]]
@@ -406,7 +406,7 @@ With `telegraf <host> <port> dump-interval <time-in-second>;` in `options`, aper
 ```
 options {
     ...
-    telegraf 127.0.0.1 8094 dump-interval 10;
+    telegraf 127.0.0.1 8094 dump-interval 10 top 20;
 }
 ```
 
@@ -414,8 +414,8 @@ Measurements (integer fields; timestamps in nanoseconds):
 
 | measurement | tags | fields | sent |
 |---|---|---|---|
-| `apermon_traffic` | `trigger`, `aggregator`, `net`, `target`, `prefix` (host aggregator only) | `in_bps`, `out_bps`, `in_pps`, `out_pps` | every dump interval, for each host/prefix/net with samples in the last 10 seconds (same as the status file) |
-| `apermon_trigger` | `trigger` | `targets` (hosts/prefixes/nets in `apermon_traffic`), `banned` (currently banned targets) | every dump interval, for each trigger |
+| `apermon_traffic` | `trigger`, `aggregator`, `net`, `target`, `prefix` (host aggregator only) | `in_bps`, `out_bps`, `in_pps`, `out_pps` | every dump interval, for each host/prefix/net with samples in the last 10 seconds (same as the status file); with `top <number>`, only for the top `<number>` of them per trigger |
+| `apermon_trigger` | `trigger` | `targets` (hosts/prefixes/nets with samples in the last 10 seconds, also those cut by `top`), `banned` (currently banned targets) | every dump interval, for each trigger |
 | `apermon_event` | `trigger`, `aggregator`, `net`, `target`, `prefix` (host aggregator only), `type` (`ban` or `unban`) | `ban`: `in_bps`, `out_bps`, `in_pps`, `out_pps`; `unban`: `peak_in_bps`, `peak_out_bps`, `peak_in_pps`, `peak_out_pps`, `duration` (seconds) | at each ban and unban |
 
 `target` is the address for the `host` aggregator, the prefix for `prefix`, and the net name for `net`; `net` is the name of the prefix list the target belongs to. Example:
@@ -428,5 +428,6 @@ apermon_event,aggregator=host,net=my-network,prefix=192.0.2.0/24,target=192.0.2.
 Notes:
 
 - UDP is fire-and-forget: apermon never waits on telegraf, and metrics sent while telegraf is down are lost. Datagrams are kept under 1400 bytes, so a remote telegraf works without IP fragmentation.
-- With `aggregate-type host`, every active host is a series. On large networks, this is a lot of series in InfluxDB; consider a longer `dump-interval`, a short retention for `apermon_traffic`, or `prefix`/`net` triggers for dashboards.
+- `top <number>` ranks the targets of each trigger by how close they are to firing it: the larger of bps / `bps` threshold and pps / `pps` threshold (bps / pps being the larger of in and out). So a trigger with only a `pps` threshold sends its top talkers by pps, and one with both sends packet floods as well as bandwidth floods. Without `top` (or with `top 0`), every target is sent.
+- With `aggregate-type host`, every active host is a series. On large networks, this is a lot of series in InfluxDB; use `top`, a short retention for `apermon_traffic`, or `prefix`/`net` triggers for dashboards.
 - `apermon_event` points work as Grafana annotations (e.g., filter on `type = 'ban'`, text from `target`).

@@ -52,6 +52,10 @@ telegraf {
     return TELEGRAF;
 }
 
+top {
+    return TOP;
+}
+
 agents {
     return AGENTS;
 }

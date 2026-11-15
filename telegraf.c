@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <arpa/inet.h>
@@ -11,6 +12,11 @@
 #define TELEGRAF_DATAGRAM_SIZE 1400
 #define TELEGRAF_LINE_SIZE 512
 
+typedef struct _ranked_flow {
+    double score;
+    const apermon_aggregated_flow *flow;
+} ranked_flow;
+
 static const apermon_config *_config;
 static int _fd = -1;
 static time_t _last_dump;
@@ -19,6 +25,10 @@ static char _buf[TELEGRAF_DATAGRAM_SIZE];
 static size_t _len;
 static unsigned _n_failed;
 static int _last_errno;
+
+// with "top <n>": min-heap of the n highest ranked targets of the trigger being dumped.
+static ranked_flow *_top;
+static size_t _n_top;
 
 static uint64_t timestamp_ns(const struct timeval *tv) {
     return (uint64_t) tv->tv_sec * 1000000000 + (uint64_t) tv->tv_usec * 1000;
@@ -86,6 +96,81 @@ static void format_tags(char *buf, size_t len, const char *trigger, uint8_t aggr
     snprintf(buf, len, "aggregator=host,net=%s,prefix=%s/%u,target=%s,trigger=%s", net->name, prefix, pfx->cidr, addr, trigger);
 }
 
+static void emit_traffic(const apermon_config_triggers *t, const apermon_aggregated_flow *af, uint64_t timestamp) {
+    char tags[TELEGRAF_LINE_SIZE], line[TELEGRAF_LINE_SIZE];
+
+    format_tags(tags, sizeof(tags), t->name, af->aggregator, af->flow_af, &af->inet, af->prefix_list, af->prefix);
+    emit(line, snprintf(line, sizeof(line), "apermon_traffic,%s in_bps=%lui,out_bps=%lui,in_pps=%lui,out_pps=%lui %lu\n",
+        tags, af->in_bps, af->out_bps, af->in_pps, af->out_pps, timestamp
+    ));
+}
+
+// how close a target is to firing the trigger: the larger of bps / bps threshold and pps / pps threshold. a trigger
+// without thresholds never fires; rank by bps then.
+static double score(const apermon_config_triggers *t, const apermon_aggregated_flow *af) {
+    double bps = af->in_bps > af->out_bps ? af->in_bps : af->out_bps;
+    double pps = af->in_pps > af->out_pps ? af->in_pps : af->out_pps;
+    double s = 0;
+
+    if (t->bps == 0 && t->pps == 0) {
+        return bps;
+    }
+
+    if (t->bps > 0) {
+        s = bps / t->bps;
+    }
+
+    if (t->pps > 0 && pps / t->pps > s) {
+        s = pps / t->pps;
+    }
+
+    return s;
+}
+
+static void top_swap(size_t a, size_t b) {
+    ranked_flow tmp = _top[a];
+    _top[a] = _top[b];
+    _top[b] = tmp;
+}
+
+static void top_offer(double s, const apermon_aggregated_flow *af) {
+    size_t i, child;
+
+    if (_n_top < _config->telegraf_top_n) {
+        // append, then sift up
+        i = _n_top++;
+        _top[i].score = s;
+        _top[i].flow = af;
+
+        while (i > 0 && _top[(i - 1) / 2].score > _top[i].score) {
+            top_swap(i, (i - 1) / 2);
+            i = (i - 1) / 2;
+        }
+
+        return;
+    }
+
+    if (s <= _top[0].score) {
+        return;
+    }
+
+    // replace the lowest ranked, then sift down
+    _top[0].score = s;
+    _top[0].flow = af;
+
+    for (i = 0; (child = 2 * i + 1) < _n_top; i = child) {
+        if (child + 1 < _n_top && _top[child + 1].score < _top[child].score) {
+            ++child;
+        }
+
+        if (_top[i].score <= _top[child].score) {
+            break;
+        }
+
+        top_swap(i, child);
+    }
+}
+
 int init_telegraf(const apermon_config *config) {
     const struct addrinfo *ai = config->telegraf_addr;
     char host[NI_MAXHOST], port[NI_MAXSERV];
@@ -108,6 +193,14 @@ int init_telegraf(const apermon_config *config) {
         log_info("sending telegraf metrics to %s port %s every %u second(s).\n", host, port, config->telegraf_dump_interval);
     }
 
+    if (config->telegraf_top_n > 0) {
+        _top = (ranked_flow *) calloc(config->telegraf_top_n, sizeof(ranked_flow));
+        if (_top == NULL) {
+            log_fatal("calloc(): %s\n", strerror(errno));
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -116,8 +209,8 @@ void telegraf_timed_callback(const struct timeval *now) {
     const apermon_hash_item *item;
     const apermon_aggregated_flow *af;
     const apermon_trigger_state *ts;
-    char tags[TELEGRAF_LINE_SIZE], line[TELEGRAF_LINE_SIZE];
-    size_t n_targets, n_banned;
+    char line[TELEGRAF_LINE_SIZE];
+    size_t n_targets, n_banned, i;
     uint64_t timestamp = timestamp_ns(now);
 
     if (_fd < 0 || now->tv_sec - _last_dump < _config->telegraf_dump_interval) {
@@ -127,7 +220,7 @@ void telegraf_timed_callback(const struct timeval *now) {
     _last_dump = now->tv_sec;
 
     for (t = _config->triggers; t != NULL; t = t->next) {
-        n_targets = n_banned = 0;
+        n_targets = n_banned = _n_top = 0;
 
         for (item = t->ctx->aggr_hash->head; item != NULL; item = item->iter_next) {
             af = (const apermon_aggregated_flow *) item->value;
@@ -138,10 +231,16 @@ void telegraf_timed_callback(const struct timeval *now) {
             }
 
             ++n_targets;
-            format_tags(tags, sizeof(tags), t->name, af->aggregator, af->flow_af, &af->inet, af->prefix_list, af->prefix);
-            emit(line, snprintf(line, sizeof(line), "apermon_traffic,%s in_bps=%lui,out_bps=%lui,in_pps=%lui,out_pps=%lui %lu\n",
-                tags, af->in_bps, af->out_bps, af->in_pps, af->out_pps, timestamp
-            ));
+
+            if (_config->telegraf_top_n > 0) {
+                top_offer(score(t, af), af);
+            } else {
+                emit_traffic(t, af, timestamp);
+            }
+        }
+
+        for (i = 0; i < _n_top; ++i) {
+            emit_traffic(t, _top[i].flow, timestamp);
         }
 
         for (item = t->ctx->trigger_status->head; item != NULL; item = item->iter_next) {

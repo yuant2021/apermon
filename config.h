@@ -147,6 +147,7 @@ typedef struct _apermon_config {
 
     struct addrinfo *telegraf_addr; /* udp destination of line protocol metrics; the first address is used */
     uint32_t telegraf_dump_interval;
+    uint32_t telegraf_top_n; /* per trigger, send only the n targets closest to firing; 0: all */
 } apermon_config;
 
 int parse_config(const char *filename, apermon_config **config);
